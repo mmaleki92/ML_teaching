@@ -1,0 +1,14 @@
+--find-links=https://girder.github.io/large_image_wheels GDAL
+geopandas
+keplergl
+palettable
+localtileserver
+streamlit
+streamlit-folium
+streamlit-keplergl
+streamlit-bokeh-events
+# leafmap
+# geemap
+git+https://github.com/giswqs/leafmap
+git+https://github.com/giswqs/geemap
+
