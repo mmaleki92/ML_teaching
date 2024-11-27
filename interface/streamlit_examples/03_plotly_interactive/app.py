@@ -1,47 +1,71 @@
-import cv2
-import mediapipe as mp
+import streamlit as st
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 
-# Initialize MediaPipe Face Mesh module
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5)
+# App Title
+st.title("Interactive 3D Plot with Plotly")
+st.write("Explore 3D visualizations generated from customizable dummy data.")
 
-# Setup drawing utilities for landmarks
-mp_drawing = mp.solutions.drawing_utils
-drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1, color=(0, 255, 0))
+# Sidebar for customization
+st.sidebar.header("3D Data Settings")
+n_points = st.sidebar.slider("Number of Data Points", min_value=100, max_value=5000, value=1000, step=100)
+distribution = st.sidebar.selectbox("Select Data Distribution", ["Normal", "Uniform", "Helix", "Sphere"])
+random_seed = st.sidebar.number_input("Random Seed", value=42, step=1)
 
-# Initialize webcam
-cap = cv2.VideoCapture(0)
+# Set random seed for reproducibility
+np.random.seed(random_seed)
 
-while cap.isOpened():
-    ret, frame = cap.read()
-    if not ret:
-        print("Ignoring empty camera frame.")
-        continue
+# Generate dummy data
+if distribution == "Normal":
+    x = np.random.normal(size=n_points)
+    y = np.random.normal(size=n_points)
+    z = np.random.normal(size=n_points)
+elif distribution == "Uniform":
+    x = np.random.uniform(-1, 1, size=n_points)
+    y = np.random.uniform(-1, 1, size=n_points)
+    z = np.random.uniform(-1, 1, size=n_points)
+elif distribution == "Helix":
+    theta = np.linspace(0, 4 * np.pi, n_points)
+    z = np.linspace(-2, 2, n_points)
+    x = np.sin(theta)
+    y = np.cos(theta)
+elif distribution == "Sphere":
+    phi = np.random.uniform(0, np.pi, size=n_points)
+    theta = np.random.uniform(0, 2 * np.pi, size=n_points)
+    x = np.sin(phi) * np.cos(theta)
+    y = np.sin(phi) * np.sin(theta)
+    z = np.cos(phi)
 
-    # To improve performance, optionally mark the image as not writeable to
-    # pass by reference.
-    frame.flags.writeable = False
-    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(frame)
+# Create DataFrame for easier handling
+df = pd.DataFrame({"X": x, "Y": y, "Z": z})
 
-    # Draw the face mesh annotations on the frame.
-    frame.flags.writeable = True
-    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            mp_drawing.draw_landmarks(
-                image=frame,
-                landmark_list=face_landmarks,
-                # connections=mp_face_mesh.FACE_CONNECTIONS,
-                landmark_drawing_spec=drawing_spec,
-                connection_drawing_spec=drawing_spec)
+# Sidebar for visualization settings
+st.sidebar.header("3D Plot Settings")
+plot_type = st.sidebar.radio("Plot Type", ["Scatter", "Surface (Requires Grid Data)"])
+color_by = st.sidebar.selectbox("Color By", ["None", "X", "Y", "Z"])
 
-    # Display the resulting frame
-    cv2.imshow('MediaPipe FaceMesh', frame)
-    if cv2.waitKey(5) & 0xFF == 27:  # Press 'ESC' to exit
-        break
+# Create interactive 3D plot
+st.subheader("3D Plot")
+if plot_type == "Scatter":
+    color = None if color_by == "None" else df[color_by]
+    fig = px.scatter_3d(df, x="X", y="Y", z="Z", color=color, title="3D Scatter Plot")
+    fig.update_traces(marker=dict(size=3))  # Adjust marker size
+else:
+    # Surface requires gridded data, create a grid from X and Y
+    grid_x, grid_y = np.meshgrid(
+        np.linspace(x.min(), x.max(), int(np.sqrt(n_points))),
+        np.linspace(y.min(), y.max(), int(np.sqrt(n_points))),
+    )
+    grid_z = np.sin(np.sqrt(grid_x**2 + grid_y**2))  # Example function for surface
+    fig = go.Figure(data=[go.Surface(z=grid_z, x=grid_x, y=grid_y)])
+    fig.update_layout(title="3D Surface Plot", scene=dict(zaxis=dict(range=[-2, 2])))
 
-cap.release()
-cv2.destroyAllWindows()
+# Show plot
+st.plotly_chart(fig, use_container_width=True)
+
+# Display data sample
+st.subheader("Generated Data Sample")
+st.write(df.head())
+

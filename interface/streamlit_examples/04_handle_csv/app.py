@@ -1,45 +1,47 @@
-import streamlit as st
-import pandas as pd
+import cv2
+import mediapipe as mp
 
-# App Title
-st.title("CSV Reader and Uploader")
-st.write("This app demonstrates how to read a CSV file and upload one interactively.")
+# Initialize MediaPipe Face Mesh module
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5)
 
-# Example for reading a CSV from a file
-st.subheader("Read CSV from File")
-st.write("This example uses a sample CSV file included in the app.")
+# Setup drawing utilities for landmarks
+mp_drawing = mp.solutions.drawing_utils
+drawing_spec = mp_drawing.DrawingSpec(thickness=1, circle_radius=1, color=(0, 255, 0))
 
-# Load a sample CSV
-sample_csv = "https://people.sc.fsu.edu/~jburkardt/data/csv/airtravel.csv"
-df_sample = pd.read_csv(sample_csv)
+# Initialize webcam
+cap = cv2.VideoCapture(0)
 
-st.write("Here is the sample CSV content:")
-st.dataframe(df_sample)
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        print("Ignoring empty camera frame.")
+        continue
 
-# Uploading CSV file via Streamlit
-st.subheader("Upload Your CSV")
-uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    # To improve performance, optionally mark the image as not writeable to
+    # pass by reference.
+    frame.flags.writeable = False
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = face_mesh.process(frame)
 
-if uploaded_file:
-    # Read the uploaded file
-    df_uploaded = pd.read_csv(uploaded_file)
+    # Draw the face mesh annotations on the frame.
+    frame.flags.writeable = True
+    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+    if results.multi_face_landmarks:
+        for face_landmarks in results.multi_face_landmarks:
+            mp_drawing.draw_landmarks(
+                image=frame,
+                landmark_list=face_landmarks,
+                # connections=mp_face_mesh.FACE_CONNECTIONS,
+                landmark_drawing_spec=drawing_spec,
+                connection_drawing_spec=drawing_spec)
 
-    # Display the first few rows
-    st.write("Here are the first few rows of your uploaded CSV:")
-    st.dataframe(df_uploaded)
+    # Display the resulting frame
+    cv2.imshow('MediaPipe FaceMesh', frame)
+    if cv2.waitKey(5) & 0xFF == 27:  # Press 'ESC' to exit
+        break
 
-    # Optional: Show summary statistics
-    st.write("Summary Statistics:")
-    st.write(df_uploaded.describe())
-
-    # Optionally allow the user to download the uploaded data as CSV
-    st.subheader("Download Your Uploaded Data")
-    csv = df_uploaded.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download CSV",
-        data=csv,
-        file_name="uploaded_data.csv",
-        mime="text/csv",
-    )
-else:
-    st.write("Upload a CSV file to see its contents here!")
+cap.release()
+cv2.destroyAllWindows()
