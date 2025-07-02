@@ -28,7 +28,7 @@ def train():
     total_score = 0
     record = 0
     agent = QLearnAgent()
-    game = SnakeGameAI()
+    game = SnakeGameAI(width=300, height=300, block_size=50)
     
     while True:
         # Get current state
