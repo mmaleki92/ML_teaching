@@ -1,10 +1,11 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 import torchvision.transforms as transforms
 from torchvision.models import resnet18
+from torch.utils.data import Subset
+import numpy as np
 import copy
 
 # --- 1. Data Augmentations ---
@@ -18,9 +19,10 @@ class TwoCropTransform:
     def __call__(self, x):
         return [self.transform(x), self.transform(x)]
 
-def get_cifar10_dataloader(batch_size=512, num_workers=4):
+def get_cifar10_dataloader(batch_size=512, num_workers=4, subset_percentage=1.0):
     """
     Returns a DataLoader for the CIFAR-10 dataset.
+    Can use a subset of the data if subset_percentage < 1.0.
     """
     # Augmentation pipeline
     transform = transforms.Compose([
@@ -34,13 +36,24 @@ def get_cifar10_dataloader(batch_size=512, num_workers=4):
         transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
     ])
 
-    # Load the CIFAR-10 dataset
-    train_dataset = torchvision.datasets.CIFAR10(
+    # Load the full CIFAR-10 training dataset
+    full_train_dataset = torchvision.datasets.CIFAR10(
         root='./data',
         train=True,
         download=True,
         transform=TwoCropTransform(transform)
     )
+
+    # --- NEW: Create a subset of the dataset ---
+    if subset_percentage < 1.0:
+        num_samples = int(len(full_train_dataset) * subset_percentage)
+        indices = np.random.choice(len(full_train_dataset), num_samples, replace=False)
+        train_dataset = Subset(full_train_dataset, indices)
+        print(f"Using a subset of {num_samples} images ({subset_percentage*100:.1f}% of the training data).")
+    else:
+        train_dataset = full_train_dataset
+        print(f"Using the full training dataset with {len(train_dataset)} images.")
+
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -131,11 +144,11 @@ def byol_loss_fn(p, z):
     return 2 - 2 * (p * z).sum(dim=-1)
 
 # --- 4. Training ---
-def train_byol(epochs=100, batch_size=512):
+def train_byol(epochs=100, batch_size=512, subset_percentage=1.0):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Get the data loader
-    train_loader = get_cifar10_dataloader(batch_size)
+    # Get the data loader with the specified subset percentage
+    train_loader = get_cifar10_dataloader(batch_size, subset_percentage=subset_percentage)
 
     # Create the ResNet backbone
     # We modify the first conv layer for CIFAR-10 as it's a small dataset
@@ -143,11 +156,11 @@ def train_byol(epochs=100, batch_size=512):
     backbone.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
     backbone.maxpool = nn.Identity()
     
-    # *** FIX: Get the feature dimension from the original fc layer BEFORE replacing it ***
+    # Get the feature dimension from the original fc layer BEFORE replacing it
     backbone_in_features = backbone.fc.in_features
     backbone.fc = nn.Identity() # We will use our own projector and predictor
 
-    # *** FIX: Pass the feature dimension to the BYOL constructor ***
+    # Pass the feature dimension to the BYOL constructor
     model = BYOL(backbone, backbone_in_features=backbone_in_features).to(device)
 
     # Create the optimizer
@@ -156,6 +169,11 @@ def train_byol(epochs=100, batch_size=512):
     print("Starting BYOL training...")
     for epoch in range(epochs):
         total_loss = 0
+        # Check if the dataloader is empty (can happen with very small subsets and large batches)
+        if len(train_loader) == 0:
+            print(f"Skipping epoch {epoch+1} due to empty dataloader. Your subset might be too small for the batch size.")
+            continue
+
         for i, (images, _) in enumerate(train_loader):
             images1 = images[0].to(device)
             images2 = images[1].to(device)
@@ -182,6 +200,5 @@ def train_byol(epochs=100, batch_size=512):
     # torch.save(model.online_encoder.state_dict(), 'byol_encoder.pth')
 
 if __name__ == '__main__':
-    train_byol()
-
-
+    # --- Use only 10% of the dataset for a quick run ---
+    train_byol(epochs=20, subset_percentage=0.1)
