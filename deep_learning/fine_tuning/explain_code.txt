@@ -1,0 +1,877 @@
+Fine-tuning LLMs for Persian Product Catalog Generation
+======================================================
+
+This document explains the process of fine-tuning a large language model (LLM) to generate Persian product catalogs in JSON format. The code and explanations are based on work by Mohammadreza Esmaeiliyan.
+
+Table of Contents:
+1. Introduction
+2. Large Language Models (LLMs)
+3. Fine-tuning Process
+4. LoRA and QLoRA
+5. Code Implementation
+6. Dataset Preparation
+7. Model Configuration
+8. Prompt Formatting
+9. Training Configuration
+10. Model Inference
+11. Model Deployment with VLLM
+12. Best Practices
+
+1. INTRODUCTION
+---------------
+
+Problem Statement:
+- Unstructured product descriptions on e-commerce platforms
+- Need for structured data in JSON format
+- Challenge: Converting Persian text to structured attributes
+- Solution: Fine-tune an LLM for this specific task
+
+Objective:
+Our goal is to take unstructured product descriptions in Persian, extract product entity and attributes, and output structured JSON data.
+
+Example Output:
+{
+  "attributes": {
+    "قد جلوی کار": "85 سانتی متر",
+    "قد پشت کار": "88 سانتی متر"
+  },
+  "product_entity": "مانتو اسپرت"
+}
+
+Importance of Structured Data:
+- Enables better search functionality
+- Improves product filtering
+- Enhances recommendation systems
+- Facilitates data analysis and business intelligence
+- Makes marketplace platforms more user-friendly
+
+2. LARGE LANGUAGE MODELS (LLMs)
+-------------------------------
+
+What are LLMs?
+- Large Language Models (LLMs) are AI systems trained on vast amounts of text
+- They learn to predict the next word in a sequence
+- Modern LLMs have billions of parameters
+- Examples: GPT models, LLaMA, BERT, etc.
+- They can perform various language tasks without task-specific training
+
+How LLMs Work - Simplified:
+- Based on Transformer architecture
+- Process text as tokens (word pieces)
+- Use attention mechanisms to understand context
+- Generate text by predicting the next token
+- Learn patterns from massive text datasets
+- Can follow instructions through proper prompting
+
+Limitations of Base LLMs:
+- Not optimized for specific tasks
+- May hallucinate or generate incorrect information
+- Lack domain-specific knowledge
+- Inconsistent formatting in structured outputs
+- Can be computationally expensive
+- Require careful prompt engineering
+
+Why Fine-tune LLMs?
+- Adapt to domain-specific tasks
+- Improve output format consistency
+- Reduce hallucinations for specific use cases
+- Better performance than prompt engineering alone
+- Smaller models become more competitive
+- Cost-effective for repeated use
+
+LLaMA Model Overview:
+- Open-source LLM developed by Meta
+- Available in different sizes (7B to 70B parameters)
+- Trained on diverse datasets
+- Performs well after fine-tuning
+- We're using LLaMA-2-7B-chat for our task
+- Relatively efficient to fine-tune on consumer hardware
+
+3. FINE-TUNING PROCESS
+----------------------
+
+What is Fine-tuning?
+- Process of adapting a pre-trained model to a specific task
+- Uses a smaller, task-specific dataset
+- Updates some or all of the model's parameters
+- Preserves general knowledge while adding specific capabilities
+- Similar to "teaching" the model a new skill
+- Requires less data than training from scratch
+
+Traditional Fine-tuning Challenges:
+- Requires substantial computational resources
+- Needs large GPU memory (16+ GB)
+- Risk of catastrophic forgetting
+- Time-consuming process
+- Difficult to iterate quickly
+- Results in large model files
+
+Efficient Fine-tuning Methods:
+Several techniques have been developed to make fine-tuning more efficient:
+- Parameter-Efficient Fine-Tuning (PEFT)
+- Low-Rank Adaptation (LoRA)
+- Quantized Low-Rank Adaptation (QLoRA)
+- Adapter layers
+- Prompt tuning
+- We'll focus on LoRA and QLoRA in this document
+
+Fine-tuning Pipeline Overview:
+1. Prepare dataset with instruction-output pairs
+2. Load pre-trained model with quantization
+3. Configure LoRA adapters
+4. Set up training parameters
+5. Train the model
+6. Evaluate performance
+7. Deploy for inference
+
+Our Fine-tuning Dataset:
+- Custom dataset for Persian product entity extraction
+- Format: instruction-output pairs
+- Instruction: Product title from Iranian marketplace
+- Output: Structured JSON with product entity and attributes
+- Source: BaSalam/entity-attribute-dataset-GPT-3.5-generated-v1
+- Contains 306,325 examples
+
+4. LoRA AND QLoRA
+----------------
+
+Low-Rank Adaptation (LoRA):
+- Efficient fine-tuning technique 
+- Instead of updating all parameters, adds small trainable "adapters"
+- Uses low-rank decomposition to reduce parameter count
+- Only trains a small subset of parameters
+- Original model weights remain frozen
+- Significantly reduces memory requirements
+
+How LoRA Works - Simplified:
+- Instead of updating weight matrix W directly
+- Approximates weight updates as W + ΔW
+- ΔW is decomposed as a product of two low-rank matrices: ΔW = A × B
+- A and B are much smaller than W
+- Only A and B are trained, W remains frozen
+- Reduces trainable parameters from millions to thousands
+
+LoRA Parameters:
+Key parameters for LoRA configuration:
+- r (rank): Size of low-rank decomposition (smaller = more efficient)
+- alpha: Scaling factor for adaptation
+- dropout: Regularization to prevent overfitting
+- target_modules: Which layers to apply LoRA to
+- In our code: r=64, alpha=128, dropout=0.1
+- Target modules: query, value, and key projections in attention layers
+
+Quantized Low-Rank Adaptation (QLoRA):
+QLoRA builds upon LoRA by adding:
+- 4-bit quantization of the base model
+- Special quantization formats (NF4)
+- Double quantization to further reduce memory
+- Paged optimizers for memory efficiency
+- Allows fine-tuning on consumer GPUs
+- Achieves similar results to full precision
+
+QLoRA Parameters:
+Key parameters for QLoRA configuration:
+- load_in_4bit: Whether to load model in 4-bit precision
+- bnb_4bit_compute_dtype: Data type for computations
+- bnb_4bit_quant_type: Quantization format (NF4)
+- bnb_4bit_use_double_quant: Enable double quantization
+- In our code: 4-bit loading, float16 compute, NF4 quantization
+
+5. CODE IMPLEMENTATION
+---------------------
+
+Required Libraries:
+
+import torch
+from datasets import load_dataset
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TrainingArguments,
+)
+from peft import LoraConfig, PeftModel
+from trl import SFTTrainer
+from trl.trainer.utils import DataCollatorForCompletionOnlyLM
+
+Libraries explanation:
+- transformers: Hugging Face library for transformer models
+- peft: Parameter-Efficient Fine-Tuning library
+- trl: Transformer Reinforcement Learning library
+- datasets: Library for accessing and processing datasets
+
+Setting Hyperparameters - General:
+
+# General parameters
+model_name = "NousResearch/Llama-2-7b-chat-hf"
+dataset_name = "BaSalam/entity-attribute-dataset-GPT-3.5-generated-v1"
+new_model = "llama-persian-catalog-generator"
+
+Explanation:
+- model_name: Base pre-trained model to fine-tune
+- dataset_name: Dataset for fine-tuning
+- new_model: Name for fine-tuned model
+
+Setting Hyperparameters - LoRA:
+
+# LoRA parameters
+lora_r = 64
+lora_alpha = lora_r * 2
+lora_dropout = 0.1
+target_modules = ["q_proj", "v_proj", 'k_proj']
+
+Explanation:
+- lora_r: Rank dimension for LoRA matrices
+- lora_alpha: Scaling factor (typically 2x rank)
+- lora_dropout: Dropout rate for regularization
+- target_modules: Model components to apply LoRA to
+
+Setting Hyperparameters - QLoRA:
+
+# QLoRA parameters
+load_in_4bit = True
+bnb_4bit_compute_dtype = "float16"
+bnb_4bit_quant_type = "nf4"
+bnb_4bit_use_double_quant = False
+
+Explanation:
+- load_in_4bit: Enable 4-bit quantization
+- bnb_4bit_compute_dtype: Data type for computations
+- bnb_4bit_quant_type: NF4 quantization format
+- bnb_4bit_use_double_quant: Disable double quantization
+
+Setting Training Arguments:
+
+# TrainingArguments parameters
+num_train_epochs = 1
+fp16 = False
+bf16 = False
+per_device_train_batch_size = 4
+gradient_accumulation_steps = 1
+gradient_checkpointing = True
+learning_rate = 0.00015
+weight_decay = 0.01
+optim = "paged_adamw_32bit"
+lr_scheduler_type = "cosine"
+max_steps = -1
+warmup_ratio = 0.03
+group_by_length = True
+save_steps = 0
+logging_steps = 25
+
+# SFT parameters
+max_seq_length = None
+packing = False
+device_map = {"": 0}
+
+# Dataset parameters
+use_special_template = True
+response_template = ' ### Answer:'
+instruction_prompt_template = '"### Human:"'
+use_llama_like_model = True
+
+Explanation:
+- num_train_epochs: Number of training passes
+- per_device_train_batch_size: Batch size
+- gradient_accumulation_steps: Update after multiple batches
+- learning_rate: Step size for optimization
+- gradient_checkpointing: Memory-saving technique
+- max_seq_length: Maximum token length (None = model default)
+
+6. DATASET PREPARATION
+---------------------
+
+Loading the Dataset:
+
+# Load dataset
+dataset = load_dataset(dataset_name, split="train")
+percent_of_train_dataset = 0.95
+other_columns = [i for i in dataset.column_names 
+                if i not in ['instruction', 'output']]
+dataset = dataset.remove_columns(other_columns)
+
+Explanation:
+- Load dataset from Hugging Face Hub
+- Keep only necessary columns (instruction, output)
+- Remove any other columns to simplify the dataset
+
+Train-Test Split:
+
+split_dataset = dataset.train_test_split(
+    train_size=int(dataset.num_rows * percent_of_train_dataset), 
+    seed=19, 
+    shuffle=False
+)
+train_dataset = split_dataset["train"]
+eval_dataset = split_dataset["test"]
+print(f"Size of the train set: {len(train_dataset)}. "
+      f"Size of the validation set: {len(eval_dataset)}")
+
+Explanation:
+- Split data into training (95%) and evaluation (5%) sets
+- Use a fixed seed for reproducibility
+- No shuffling to maintain dataset order
+- Print dataset sizes for verification
+
+Dataset Structure:
+Each example in the dataset contains:
+- instruction: The task description and product title
+  "### Question: here is a product title from an 
+  Iranian marketplace. Give me the Product Entity 
+  and Attributes of this product in Persian language.
+  product title: مانتو اسپرت پانیذ قد جلوی کار حدودا 
+  85 سانتی متر قد پشت کار حدودا 88 سانتی متر"
+  
+- output: The expected structured JSON output
+  {
+    "attributes": {
+      "قد جلوی کار": "85 سانتی متر",
+      "قد پشت کار": "88 سانتی متر"
+    },
+    "product_entity": "مانتو اسپرت"
+  }
+
+Why Dataset Quality Matters:
+- Clean, well-structured data improves model performance
+- Consistent formatting helps the model learn patterns
+- Diverse examples enhance model generalization
+- Quality trumps quantity in fine-tuning datasets
+- Our dataset was created using GPT-3.5 to ensure quality
+- Contains product descriptions from Iranian marketplaces
+
+7. MODEL CONFIGURATION
+---------------------
+
+LoRA Configuration:
+
+# Load LoRA configuration
+peft_config = LoraConfig(
+    r=lora_r,
+    lora_alpha=lora_alpha,
+    lora_dropout=lora_dropout,
+    bias="none",
+    task_type="CAUSAL_LM",
+    target_modules=target_modules
+)
+
+Explanation:
+- Create LoRA configuration with previously defined parameters
+- Set task type to causal language modeling
+- No bias adaptation
+- Target key attention modules for efficient adaptation
+
+QLoRA Configuration:
+
+# Load QLoRA configuration
+compute_dtype = getattr(torch, bnb_4bit_compute_dtype)
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=load_in_4bit,
+    bnb_4bit_quant_type=bnb_4bit_quant_type,
+    bnb_4bit_compute_dtype=compute_dtype,
+    bnb_4bit_use_double_quant=bnb_4bit_use_double_quant,
+)
+
+Explanation:
+- Configure BitsAndBytes for 4-bit quantization
+- Convert string data type to actual PyTorch data type
+- Enable NormalFloat4 (NF4) quantization for optimal results
+- Set compute precision to float16 for stability
+
+Loading the Base Model:
+
+# Load base model
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    quantization_config=bnb_config,
+    device_map=device_map
+)
+model.config.use_cache = False
+
+Explanation:
+- Load LLaMA-2-7B model with quantization
+- Apply the BitsAndBytes configuration
+- Map model to available devices (e.g., GPU)
+- Disable KV cache for training (improves gradient calculation)
+
+Training Arguments:
+
+# Set training parameters
+training_arguments = TrainingArguments(
+    output_dir=new_model,
+    num_train_epochs=num_train_epochs,
+    per_device_train_batch_size=per_device_train_batch_size,
+    gradient_accumulation_steps=gradient_accumulation_steps,
+    optim=optim,
+    save_steps=save_steps,
+    logging_steps=logging_steps,
+    learning_rate=learning_rate,
+    weight_decay=weight_decay,
+    fp16=fp16,
+    bf16=bf16,
+    max_steps=max_steps,
+    warmup_ratio=warmup_ratio,
+    gradient_checkpointing=gradient_checkpointing,
+    group_by_length=group_by_length,
+    lr_scheduler_type=lr_scheduler_type
+)
+
+Explanation:
+- Configure all training hyperparameters
+- Set output directory for model checkpoints
+- Enable memory-saving techniques like gradient checkpointing
+
+Tokenizer Configuration:
+
+# Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained(
+    model_name, 
+    trust_remote_code=True
+)
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "right"  # Fix overflow issue
+if not tokenizer.chat_template:
+    tokenizer.chat_template = """
+    {% for message in messages %}
+    {{'<|im_start|>' + message['role'] + '\n' + 
+      message['content'] + '<|im_end|>' + '\n'}}
+    {% endfor %}"""
+
+Explanation:
+- Load tokenizer corresponding to the base model
+- Set padding token to end-of-sequence token
+- Configure right-side padding for stability
+- Define chat template if not already present
+
+Chat Templates Explained:
+- Chat templates structure conversations for LLMs
+- They define special tokens that mark different parts of the conversation
+- Help the model distinguish between user and assistant messages
+- Improve model understanding of conversational context
+- Format: <|im_start|>role\ncontent<|im_end|>
+- Our template adapts the LLaMA-2 format for our task
+
+8. PROMPT FORMATTING
+-------------------
+
+Prompt Formatting Functions:
+
+def special_formatting_prompts(example):
+    output_texts = []
+    for i in range(len(example['instruction'])):
+        text = f"{instruction_prompt_template}
+                {example['instruction'][i]}\n
+                {response_template} 
+                {example['output'][i]}"
+        output_texts.append(text)
+    return output_texts
+
+def normal_formatting_prompts(example):
+    output_texts = []
+    for i in range(len(example['instruction'])):
+        chat_temp = [
+            {"role": "system", 
+             "content": example['instruction'][i]},
+            {"role": "assistant", 
+             "content": example['output'][i]}
+        ]
+        text = tokenizer.apply_chat_template(
+            chat_temp, tokenize=False
+        )
+        output_texts.append(text)
+    return output_texts
+
+Formatting Function Explanation:
+- special_formatting_prompts:
+  - Uses custom template with instruction and response markers
+  - Works well with models that require specific formatting
+  - Format: ### Human: instruction\n ### Answer: output
+
+- normal_formatting_prompts:
+  - Uses model's built-in chat template
+  - Structures conversation as system and assistant messages
+  - More standard approach but may be less effective for some tasks
+
+- We'll use special formatting for our task
+
+Data Collator Configuration:
+
+if use_special_template:
+    formatting_func = special_formatting_prompts
+    if use_llama_like_model:
+        response_template_ids = tokenizer.encode(
+            response_template, 
+            add_special_tokens=False
+        )[2:]
+        collator = DataCollatorForCompletionOnlyLM(
+            response_template=response_template_ids, 
+            tokenizer=tokenizer
+        )
+    else:
+        collator = DataCollatorForCompletionOnlyLM(
+            response_template=response_template, 
+            tokenizer=tokenizer
+        )
+else:
+    formatting_func = normal_formatting_prompts
+
+Explanation:
+- Select formatting function based on template preference
+- Configure data collator to focus on completion part only
+- Handle LLaMA-specific tokenization requirements
+
+What is Completion-Only Learning?
+- Standard LLM training computes loss on the entire sequence
+- Completion-Only computes loss only on the assistant's response
+- Ignores the instruction part during loss calculation
+- This focuses the learning on generating correct outputs
+- Response template helps identify where assistant response begins
+- Makes training more efficient for instruction-tuning
+
+9. TRAINING CONFIGURATION
+------------------------
+
+SFT Trainer Setup:
+
+trainer = SFTTrainer(
+    model=model,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    peft_config=peft_config,
+    formatting_func=formatting_func,
+    data_collator=collator,
+    processing_class=tokenizer,
+    args=training_arguments,
+    packing=packing
+)
+
+Explanation:
+- SFTTrainer: Specialized trainer for Supervised Fine-Tuning
+- Integrates PEFT configuration with training process
+- Applies custom formatting to dataset examples
+- Uses completion-only collator for targeted learning
+- Configures all training parameters in one place
+
+Understanding SFTTrainer:
+- Part of the TRL (Transformer Reinforcement Learning) library
+- Designed specifically for instruction fine-tuning
+- Handles specialized requirements for conversation formats
+- Integrates seamlessly with PEFT methods
+- Simplifies the training process with a unified API
+- Offers additional optimizations for instruction tuning
+
+What Happens During Training?
+1. Dataset examples are formatted with instructions and outputs
+2. Each example is tokenized and processed
+3. Only LoRA parameters are updated (base model stays frozen)
+4. Loss is calculated only on the completion part
+5. Gradients are computed and parameters updated
+6. Process repeats for all examples over specified epochs
+7. Evaluation metrics are calculated periodically
+
+Executing the Training:
+
+# Train model
+trainer.train()
+
+# Save fine tuned Lora Adaptor
+trainer.model.save_pretrained(new_model)
+
+Explanation:
+- Simple API call to start the training process
+- Training progress is logged at specified intervals
+- After completion, save the trained LoRA adapters
+- Small adapter files (MBs) instead of full model (GBs)
+
+Training Process Visualization:
+During training, you'll see progress like:
+
+Applying formatting function to train dataset: 100%
+291008/291008 [00:04<00:00, 73034.84 examples/s]
+
+Adding EOS to train dataset: 100%
+291008/291008 [00:21<00:00, 15256.08 examples/s]
+
+Tokenizing train dataset: 100%
+291008/291008 [03:50<00:00, 1473.75 examples/s]
+
+Truncating train dataset: 100%
+291008/291008 [00:10<00:00, 11413.80 examples/s]
+
+Followed by training progress:
+
+Epoch 1/1: 100%
+1100/1100 [01:32<00:00, 13.67it/s, loss=0.523]
+
+10. MODEL INFERENCE
+-----------------
+
+Preparing for Inference:
+
+import torch
+import gc
+
+def clear_hardwares():
+    torch.clear_autocast_cache()
+    torch.cuda.ipc_collect()
+    torch.cuda.empty_cache()
+    gc.collect()
+
+clear_hardwares()
+clear_hardwares()
+
+Explanation:
+- Clear GPU memory before loading model for inference
+- Remove cached tensors and unused objects
+- Free up memory for model loading
+- Important when working with limited GPU resources
+
+Inference Helper Function:
+
+def generate(model, prompt: str, kwargs):
+    tokenized_prompt = tokenizer(
+        prompt, 
+        return_tensors='pt'
+    ).to(model.device)
+
+    prompt_length = len(
+        tokenized_prompt.get('input_ids')[0]
+    )
+
+    with torch.cuda.amp.autocast():
+        output_tokens = model.generate(
+            **tokenized_prompt, 
+            **kwargs
+        ) if kwargs else model.generate(
+            **tokenized_prompt
+        )
+        
+        output = tokenizer.decode(
+            output_tokens[0][prompt_length:], 
+            skip_special_tokens=True
+        )
+
+    return output
+
+Inference Function Explanation:
+The generate function:
+- Tokenizes the input prompt
+- Moves tokens to the model's device (GPU)
+- Records prompt length to trim it from final output
+- Uses CUDA autocast for efficient mixed-precision inference
+- Calls model.generate with provided parameters
+- Decodes only the newly generated tokens
+- Removes special tokens from the output
+- Returns clean text output
+
+Loading Model for Inference:
+
+base_model = AutoModelForCausalLM.from_pretrained(
+    new_model, 
+    return_dict=True, 
+    device_map='auto', 
+    token=''
+)
+tokenizer = AutoTokenizer.from_pretrained(
+    new_model, 
+    max_length=max_seq_length
+)
+model = PeftModel.from_pretrained(
+    base_model, 
+    new_model
+)
+del base_model
+
+Explanation:
+- Load base model with auto device mapping
+- Load the associated tokenizer
+- Apply LoRA adapters with PeftModel
+- Delete base model reference to save memory
+
+Preparing a Test Prompt:
+
+sample = eval_dataset[0]
+if use_special_template:
+    prompt = f"{instruction_prompt_template}
+              {sample['instruction']}
+              \n{response_template}"
+else:
+    chat_temp = [{
+        "role": "system", 
+        "content": sample['instruction']
+    }]
+    prompt = tokenizer.apply_chat_template(
+        chat_temp, 
+        tokenize=False, 
+        add_generation_prompt=True
+    )
+
+Explanation:
+- Take first example from evaluation set
+- Format prompt using the same template as training
+- Ensure consistent formatting between training and inference
+
+Running Inference:
+
+gen_kwargs = {"max_new_tokens": 1024}
+generated_texts = generate(
+    model=model, 
+    prompt=prompt, 
+    kwargs=gen_kwargs
+)
+print(generated_texts)
+
+Explanation:
+- Set generation parameters (max token length)
+- Call our generate function with the test prompt
+- Print the generated structured JSON output
+- Expected output: JSON with product entity and attributes
+
+Sample Inference Output:
+Input prompt:
+
+### Human: here is a product title from an Iranian 
+marketplace. Give me the Product Entity and Attributes 
+of this product in Persian language.
+
+product title: مانتو اسپرت پانیذ قد جلوی کار حدودا 
+85 سانتی متر قد پشت کار حدودا 88 سانتی متر
+
+### Answer:
+
+Model output:
+
+{
+    "attributes": {
+        "قد جلوی کار": "85 سانتی متر",
+        "قد پشت کار": "88 سانتی متر"
+    },
+    "product_entity": "مانتو اسپرت"
+}
+
+11. MODEL DEPLOYMENT WITH VLLM
+-----------------------------
+
+Merging and Saving the Model:
+
+clear_hardwares()
+merged_model = model.merge_and_unload()
+clear_hardwares()
+del model
+adapter_model_name = 'your_hf_account/your_desired_name'
+merged_model.push_to_hub(adapter_model_name)
+
+Explanation:
+- Merge LoRA adapters with base model
+- Clear memory to ensure enough space
+- Delete original model to free memory
+- Push merged model to Hugging Face Hub
+
+Alternative: Pushing Only the Adapter:
+Instead of pushing the entire merged model, you can push just the adapter:
+
+model.push_to_hub(adapter_model_name)
+
+And later load it like this:
+
+config = PeftConfig.from_pretrained(adapter_model_name)
+model = AutoModelForCausalLM.from_pretrained(
+    config.base_model_name_or_path, 
+    return_dict=True, 
+    load_in_8bit=True, 
+    device_map='auto'
+)
+tokenizer = AutoTokenizer.from_pretrained(config.base_model_name_or_path)
+
+# Load the Lora model
+model = PeftModel.from_pretrained(model, adapter_model_name)
+
+Fast Inference with VLLM:
+VLLM is one of the fastest inference engines for LLMs, offering significantly better throughput than standard implementations.
+
+from vllm import LLM, SamplingParams
+
+prompt = """### Question: here is a product title from a Iranian marketplace.  \n
+         give me the Product Entity and Attributes of this product in Persian language.\n
+         give the output in this json format: {'attributes': {'attribute_name' : <attribute value>, ...}, 'product_entity': '<product entity>'}.\n
+         Don't make assumptions about what values to plug into json. Just give Json not a single word more.\n
+         \nproduct title:"""
+user_prompt_template = '### Question: '
+response_template = ' ### Answer:'
+
+llm = LLM(model='BaSalam/Llama2-7b-entity-attr-v1', 
+          gpu_memory_utilization=0.9, 
+          trust_remote_code=True)
+
+product = 'مانتو اسپرت پانیذ قد جلوی کار حدودا 85 سانتی متر قد پشت کار حدودا 88 سانتی متر'
+sampling_params = SamplingParams(temperature=0.0, max_tokens=75)
+prompt = f'{user_prompt_template} {prompt}{product}\n {response_template}'
+outputs = llm.generate(prompt, sampling_params)
+
+print(outputs[0].outputs[0].text)
+
+Explanation:
+- VLLM provides optimized inference for LLMs
+- Uses advanced techniques like continuous batching and paged attention
+- Offers much higher throughput than standard Hugging Face inference
+- Simple API similar to standard generation
+- Can be easily deployed as a service
+
+Example Output:
+
+{
+    "attributes": {
+        "قد جلوی کار": "85 سانتی متر",
+        "قد پشت کار": "88 سانتی متر"
+    },
+    "product_entity": "مانتو اسپرت"
+}
+
+12. BEST PRACTICES
+-----------------
+
+Dataset Preparation:
+- Use high-quality, consistent data
+- Ensure diverse examples covering edge cases
+- Clean and preprocess text to remove noise
+- Balance different types of examples
+- Verify that outputs follow the desired format
+
+LoRA Configuration:
+- Start with moderate rank (r=16 or r=32)
+- Target only attention layers for efficiency
+- Use dropout for regularization (0.05-0.1)
+- Alpha should be 2x-3x the rank value
+- Experiment with different target modules
+
+Training Parameters:
+- Use small batch sizes (4-8) for better stability
+- Enable gradient checkpointing to save memory
+- Use low learning rates (1e-4 to 3e-4)
+- Train for 1-3 epochs to avoid overfitting
+- Use cosine learning rate schedule with warmup
+
+Memory Optimization:
+- Use 4-bit quantization (QLoRA)
+- Enable gradient checkpointing
+- Accumulate gradients if needed
+- Clear cache regularly during inference
+- Only load what you need into GPU memory
+
+Evaluation:
+- Check performance on held-out test set
+- Evaluate both technical metrics and human judgment
+- Test with diverse prompts and edge cases
+- Compare against baseline (prompt-only) performance
+- Look for consistency in output formatting
+
+Deployment:
+- Use optimized inference engines like VLLM
+- Consider batch processing for large workloads
+- Monitor performance and adjust as needed
+- Set appropriate generation parameters (temperature, max_tokens)
+- Use caching for repeated queries
+
+For more information on fine-tuning best practices, refer to Sebastian Raschka's Magazine: https://magazine.sebastianraschka.com/p/practical-tips-for-finetuning-llms
+
+This concludes our explanation of fine-tuning LLMs for Persian product catalog generation. The techniques described here can be adapted for many other structured output tasks across various languages and domains.
